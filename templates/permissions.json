@@ -1,0 +1,10 @@
+{
+  "mode": "draft_only",
+  "read_authenticated_sources": {},
+  "send_applications": false,
+  "send_messages": false,
+  "publish_profiles": false,
+  "schedule_meetings": false,
+  "automatic_uploads": false,
+  "authorization_log": []
+}

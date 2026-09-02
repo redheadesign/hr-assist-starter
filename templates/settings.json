@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "language": null,
+  "timezone": "UTC",
+  "target": {
+    "roles": [],
+    "levels": [],
+    "markets": [],
+    "locations": [],
+    "formats": [],
+    "relocation": null,
+    "salary": {
+      "minimum": null,
+      "target": null,
+      "currency": null,
+      "period": null,
+      "basis": null,
+      "publish": false
+    },
+    "excluded_segments": []
+  },
+  "writing": {
+    "tone": null,
+    "no_em_dash": true,
+    "emojis": false
+  },
+  "channels": [],
+  "schedule": {
+    "enabled": false,
+    "requested": null
+  }
+}
