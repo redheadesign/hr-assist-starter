@@ -6,7 +6,7 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-TEXT_SUFFIXES = {".py", ".md", ".txt", ".json"}
+TEXT_SUFFIXES = {".py", ".md", ".txt", ".json", ".ps1"}
 SPECIAL_FILES = {".gitignore", ".gitattributes", ".release-allowlist", ".githooks/pre-push"}
 PATTERNS = {
     "email": re.compile(r"[A-Za-z0-9_.+%-]+@(?!(?:example\.invalid)\b)[A-Za-z0-9.-]+\.[A-Za-z]{2,}"),

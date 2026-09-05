@@ -10,14 +10,19 @@ import os
 import sys
 import time
 import uuid
+import threading
+from contextlib import contextmanager
+from functools import wraps
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
-from workspace import LOCAL, local_path, timezone_for_workspace
+from workspace import local_path, timezone_for_workspace
+from hr_policy import normalize_platform, read_config
+from hr_analytics import analyze, positive, experiment_status, render as render_analytics
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = local_path("")
 DATA_DIR = local_path("data")
 ADAPTERS_PATH = local_path("config/adapters.json")
 WORKSPACE_TZ = timezone_for_workspace()
@@ -71,7 +76,35 @@ ADAPTER_STATUSES = {
 APPLICATION_ORIGINS = {"user_confirmed", "platform_observed"}
 
 STAGE_ORDER = ("sent", "viewed", "reply", "screening", "interview", "test", "offer")
-POSITIVE_EVENTS = {"reply", "screening", "interview", "test", "offer"}
+_TRANSACTION_MUTEX = threading.RLock()
+_TRANSACTION_LOCAL = threading.local()
+
+
+@contextmanager
+def transaction():
+    """Serialize the entire read/check/write sequence across threads/processes.
+
+Nested store helpers reuse the outer lock; standalone helpers are safe too.
+"""
+    with _TRANSACTION_MUTEX:
+        if getattr(_TRANSACTION_LOCAL, "active", False):
+            yield
+            return
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with FileLock(DATA_DIR / ".write.lock"):
+            _TRANSACTION_LOCAL.active = True
+            try:
+                yield
+            finally:
+                _TRANSACTION_LOCAL.active = False
+
+
+def transactional(function):
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        with transaction():
+            return function(*args, **kwargs)
+    return wrapped
 
 
 class StoreError(RuntimeError):
@@ -118,6 +151,7 @@ def write_json_atomic(path: Path, value: dict[str, Any]) -> None:
     os.replace(temporary, path)
 
 
+@transactional
 def load_jsonl(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
@@ -154,33 +188,52 @@ class FileLock:
         self.fd: int | None = None
 
     def __enter__(self) -> "FileLock":
+        # OS locks are released even when a process is terminated. Keep the
+        # lock file in place: unlinking it could split concurrent lock owners.
+        self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR)
+        if os.fstat(self.fd).st_size == 0:
+            os.write(self.fd, b"0")
         deadline = time.monotonic() + self.timeout
         while True:
             try:
-                self.fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.write(self.fd, str(os.getpid()).encode("ascii"))
+                os.lseek(self.fd, 0, os.SEEK_SET)
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(self.fd, msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 return self
-            except FileExistsError:
+            except OSError:
                 if time.monotonic() >= deadline:
+                    os.close(self.fd)
+                    self.fd = None
                     raise StoreError(f"Не удалось получить блокировку {self.path.name}")
                 time.sleep(0.1)
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
         if self.fd is not None:
-            os.close(self.fd)
-        self.path.unlink(missing_ok=True)
+            try:
+                os.lseek(self.fd, 0, os.SEEK_SET)
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(self.fd, msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(self.fd, fcntl.LOCK_UN)
+            finally:
+                os.close(self.fd)
 
 
+@transactional
 def append_record(kind: str, record: dict[str, Any]) -> None:
     ensure_files()
     path = FILES[kind]
-    lock_path = DATA_DIR / ".write.lock"
     serialized = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
-    with FileLock(lock_path):
-        with path.open("a", encoding="utf-8", newline="\n") as handle:
-            handle.write(serialized + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
+    with path.open("a", encoding="utf-8", newline="\n") as handle:
+        handle.write(serialized + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def require(payload: dict[str, Any], fields: Iterable[str]) -> None:
@@ -198,6 +251,7 @@ def latest_by_id(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return result
 
 
+@transactional
 def append_event_if_new(record: dict[str, Any]) -> tuple[bool, str]:
     source_event_key = record.get("source_event_key")
     if source_event_key:
@@ -214,9 +268,11 @@ def command_init(_: argparse.Namespace) -> int:
     return 0
 
 
+@transactional
 def command_add_vacancy(args: argparse.Namespace) -> int:
     payload = read_payload(args.json_path)
     require(payload, ("source", "company", "title"))
+    payload["source"] = normalize_platform(payload["source"])
     records = load_jsonl(FILES["vacancy"])
     source_url = payload.get("source_url")
     if source_url:
@@ -239,16 +295,19 @@ def command_add_vacancy(args: argparse.Namespace) -> int:
     return 0
 
 
+@transactional
 def command_confirm_sent(args: argparse.Namespace) -> int:
     payload = read_payload(args.json_path)
     require(payload, ("vacancy_id", "channel"))
+    payload["channel"] = normalize_platform(payload.get("submission_channel", payload["channel"]))
+    payload["submission_channel"] = payload["channel"]
     vacancies = latest_by_id(load_jsonl(FILES["vacancy"]))
     if payload["vacancy_id"] not in vacancies:
         raise StoreError(f"Вакансия {payload['vacancy_id']} не найдена")
 
     applications = load_jsonl(FILES["application"])
     for record in applications:
-        if record.get("vacancy_id") == payload["vacancy_id"] and record.get("channel") == payload["channel"]:
+        if record.get("vacancy_id") == payload["vacancy_id"] and normalize_platform(record.get("channel", "")) == payload["channel"]:
             raise StoreError(f"Отправка уже записана: {record.get('id')}")
 
     timestamp = payload.pop("sent_at", now_iso())
@@ -289,15 +348,12 @@ def _find_or_create_observed_vacancy(payload: dict[str, Any], timestamp: str) ->
     title = str(payload["title"])
     vacancy_url = payload.get("vacancy_url")
     vacancies = load_jsonl(FILES["vacancy"])
+    if payload.get("vacancy_id"):
+        if payload["vacancy_id"] not in latest_by_id(vacancies):
+            raise StoreError("Неизвестная vacancy_id")
+        return str(payload["vacancy_id"])
     for record in reversed(vacancies):
         if vacancy_url and record.get("source_url") == vacancy_url:
-            return str(record["id"])
-        if (
-            not vacancy_url
-            and record.get("source") == source
-            and record.get("company") == company
-            and record.get("title") == title
-        ):
             return str(record["id"])
 
     record = {
@@ -307,40 +363,64 @@ def _find_or_create_observed_vacancy(payload: dict[str, Any], timestamp: str) ->
         "last_seen_at": timestamp,
         "source": source,
         "source_url": vacancy_url,
+        "source_application_key": payload.get("source_application_key"),
         "source_urls": [vacancy_url] if vacancy_url else [],
         "company": company,
         "title": title,
         "status": "applied",
         "captured_from_platform": True,
     }
-    for field in ("segment", "vacancy_summary", "level", "location", "work_format", "salary"):
+    for field in ("segment", "vacancy_summary", "level", "location", "work_format", "salary",
+                  "matched_fact_ids", "canonical_key", "requirements", "risks", "score", "eligibility"):
         if payload.get(field) not in (None, "", []):
             record[field] = payload[field]
     append_record("vacancy", record)
     return str(record["id"])
 
 
+def ensure_observed_sent_event(record: dict) -> None:
+    """Repair interruption after writing the application but before its event."""
+    if any(e.get("application_id") == record["id"] and e.get("type") == "sent"
+           for e in load_jsonl(FILES["event"])):
+        return
+    source = normalize_platform(record.get("source", record.get("channel", "")))
+    at = record.get("sent_at") or record["observed_at"]
+    append_event_if_new({"id": new_id("evt"), "application_id": record["id"], "at": at,
+                         "observed_at": record["observed_at"], "type": "sent", "source": source,
+                         "source_url": record.get("source_url"), "source_application_key": record["source_application_key"],
+                         "source_event_key": f"{source}:{record['source_application_key']}:sent",
+                         "actor": "platform", "detail": "Отклик обнаружен на площадке", "confidence": "high",
+                         "date_quality": record["date_quality"], "imported": record.get("imported", False)})
+
+
+@transactional
 def command_observe_application(args: argparse.Namespace) -> int:
     payload = read_payload(args.json_path)
     require(payload, ("source", "source_application_key", "company", "title"))
-    source = str(payload["source"])
+    source = normalize_platform(payload["source"])
+    submission_channel = normalize_platform(payload.get("submission_channel", source))
+    payload["source"] = source
+    if payload.get("discovery_source"):
+        payload["discovery_source"] = normalize_platform(payload["discovery_source"])
     source_application_key = str(payload["source_application_key"])
     observed_at = str(payload.get("observed_at") or now_iso())
-    vacancy_id = _find_or_create_observed_vacancy(payload, observed_at)
-
     applications = load_jsonl(FILES["application"])
     existing_application: dict[str, Any] | None = None
     for record in reversed(applications):
-        if record.get("source") == source and record.get("source_application_key") == source_application_key:
+        if ((normalize_platform(record.get("source", "")) == source and record.get("source_application_key") == source_application_key)
+                or (payload.get("canonical_key") and record.get("canonical_key") == payload["canonical_key"])):
             existing_application = record
             break
+    vacancy_id = str(existing_application["vacancy_id"]) if existing_application else _find_or_create_observed_vacancy(payload, observed_at)
     if existing_application is None:
         for record in reversed(applications):
-            if record.get("vacancy_id") == vacancy_id and (record.get("source") or record.get("channel")) == source:
+            if record.get("vacancy_id") == vacancy_id and normalize_platform(record.get("source") or record.get("channel", "")) == source:
                 existing_application = record
                 break
 
     if existing_application is not None:
+        if existing_application.get("record_origin") == "platform_observed":
+            ensure_observed_sent_event(existing_application)
         print(
             json.dumps(
                 {"status": "exists", "id": existing_application.get("id"), "vacancy_id": vacancy_id},
@@ -360,14 +440,21 @@ def command_observe_application(args: argparse.Namespace) -> int:
         "confirmed_by_user": False,
         "include_in_period_metrics": bool(payload.get("include_in_period_metrics", bool(sent_at))),
         "date_quality": date_quality,
-        "channel": source,
+        "channel": submission_channel,
+        "submission_channel": submission_channel,
         "source": source,
         "source_application_key": source_application_key,
         "source_url": payload.get("application_url"),
         "status": payload.get("status", "sent"),
         "imported": bool(payload.get("imported", False)),
     }
-    for field in ("cover_letter_text", "cover_letter_style", "cover_letter_issue_flags"):
+    for old, new in (("campaign", "campaign_id"), ("variant_id", "variant")):
+        if payload.get(old) and not payload.get(new):
+            payload[new] = payload[old]
+    for field in ("cover_letter_text", "cover_letter_style", "cover_letter_issue_flags",
+                  "campaign_id", "experiment_id", "variant", "discovery_source",
+                  "profile_version", "fact_version", "matched_fact_ids", "cover_hash",
+                  "copy_review_ref", "artifact_ref", "canonical_key", "evidence", "packet_ref"):
         if payload.get(field) not in (None, "", []):
             record[field] = payload[field]
     if record.get("cover_letter_text"):
@@ -375,32 +462,17 @@ def command_observe_application(args: argparse.Namespace) -> int:
         record["cover_letter_source"] = payload.get("cover_letter_source", "platform_observed")
     append_record("application", record)
 
-    event_at = str(sent_at or observed_at)
-    append_event_if_new(
-        {
-            "id": new_id("evt"),
-            "application_id": record["id"],
-            "at": event_at,
-            "observed_at": observed_at,
-            "type": "sent",
-            "source": source,
-            "source_url": payload.get("application_url"),
-            "source_application_key": source_application_key,
-            "source_event_key": f"{source}:{source_application_key}:sent",
-            "actor": "platform",
-            "detail": "Отклик обнаружен на площадке",
-            "confidence": "high",
-            "date_quality": date_quality,
-            "imported": bool(payload.get("imported", False)),
-        }
-    )
+    ensure_observed_sent_event(record)
     print(json.dumps({"status": "created", "id": record["id"], "vacancy_id": vacancy_id}, ensure_ascii=False))
     return 0
 
 
+@transactional
 def command_add_event(args: argparse.Namespace) -> int:
     payload = read_payload(args.json_path)
     require(payload, ("application_id", "type"))
+    if payload.get("source"):
+        payload["source"] = normalize_platform(payload["source"])
     if payload["type"] not in EVENT_TYPES:
         raise StoreError("Неизвестный тип события: " + str(payload["type"]))
     applications = latest_by_id(load_jsonl(FILES["application"]))
@@ -418,8 +490,8 @@ def command_add_event(args: argparse.Namespace) -> int:
         payload["rejection_type"] = rejection_type
         if rejection_type == "auto_bot":
             message_text = payload.pop("message_text", None)
-            alternate_text = payload.pop("raw_text", None)
-            raw_text = message_text or alternate_text
+            raw_text = payload.pop("raw_text", None) or message_text or payload.get("detail")
+            payload["detail"] = "Шаблонный автоотказ"
             if raw_text:
                 payload["template_fingerprint"] = text_fingerprint(str(raw_text))
             payload["template_text_omitted"] = True
@@ -440,6 +512,7 @@ def command_add_event(args: argparse.Namespace) -> int:
     return 0
 
 
+@transactional
 def command_add_feedback(args: argparse.Namespace) -> int:
     payload = read_payload(args.json_path)
     require(payload, ("application_id", "raw_text"))
@@ -452,6 +525,8 @@ def command_add_feedback(args: argparse.Namespace) -> int:
     if rejection_type == "auto_bot":
         raw_text = str(payload.pop("raw_text"))
         payload.pop("message_text", None)
+        if "detail" in payload:
+            payload["detail"] = "Шаблонный автоотказ"
         payload["raw_text_fingerprint"] = text_fingerprint(raw_text)
         payload["raw_text_omitted"] = True
     record = {
@@ -465,6 +540,7 @@ def command_add_feedback(args: argparse.Namespace) -> int:
     return 0
 
 
+@transactional
 def command_record_adapter_scan(args: argparse.Namespace) -> int:
     payload = read_payload(args.json_path)
     require(payload, ("adapter", "status"))
@@ -574,7 +650,10 @@ def pct(value: int, total: int) -> str:
     return "0%" if not total else f"{value / total * 100:.1f}%"
 
 
-def build_summary(start: datetime, end: datetime) -> str:
+@transactional
+def build_summary(start: datetime, end: datetime, *, as_of: datetime | None = None, window_days: int | None = None) -> str:
+    as_of = as_of or datetime.now(WORKSPACE_TZ)
+    window_days = window_days if window_days is not None else read_config("workflow.json")["response_window_days"]
     vacancies = latest_by_id(load_jsonl(FILES["vacancy"]))
     all_applications = load_jsonl(FILES["application"])
     applications = [
@@ -582,11 +661,15 @@ def build_summary(start: datetime, end: datetime) -> str:
         for item in all_applications
         if item.get("sent_at")
         and item.get("include_in_period_metrics", True) is not False
+        and item.get("date_quality") != "observed_only"
         and start <= parse_iso(str(item["sent_at"])) < end
+        and parse_iso(str(item["sent_at"])) <= as_of
     ]
     app_ids = {item["id"] for item in applications if item.get("id")}
-    events = [item for item in load_jsonl(FILES["event"]) if item.get("application_id") in app_ids]
-    feedback = [item for item in load_jsonl(FILES["feedback"]) if item.get("application_id") in app_ids]
+    events = [item for item in load_jsonl(FILES["event"]) if item.get("application_id") in app_ids
+              and item.get("at") and parse_iso(str(item["at"])) <= as_of]
+    feedback = [item for item in load_jsonl(FILES["feedback"]) if item.get("application_id") in app_ids
+                and item.get("at") and parse_iso(str(item["at"])) <= as_of]
 
     event_types_by_app: dict[str, set[str]] = defaultdict(set)
     rejection_type_by_app: dict[str, str] = {}
@@ -607,9 +690,13 @@ def build_summary(start: datetime, end: datetime) -> str:
         stage: sum(1 for app in applications if stage in event_types_by_app.get(str(app.get("id")), set()))
         for stage in STAGE_ORDER
     }
-    positive = sum(
-        1 for app in applications if event_types_by_app.get(str(app.get("id")), set()) & POSITIVE_EVENTS
-    )
+    positive_ids = {
+        item.get("application_id") for item in events
+        if positive(item)
+    }
+    positive_count = sum(1 for app in applications if app.get("id") in positive_ids)
+    bot_screenings = len({item.get("application_id") for item in events
+                          if item.get("type") == "screening" and item.get("actor") == "bot"})
     rejections = sum(
         1 for app in applications if "rejection" in event_types_by_app.get(str(app.get("id")), set())
     )
@@ -627,7 +714,8 @@ def build_summary(start: datetime, end: datetime) -> str:
         f"# Воронка: {start.date().isoformat()} – {(end - timedelta(microseconds=1)).date().isoformat()}",
         "",
         f"Отправлено: **{total}**",
-        f"Содержательный ответ или следующий этап: **{positive}** ({pct(positive, total)})",
+        f"Содержательный ответ или следующий этап: **{positive_count}** ({pct(positive_count, total)})",
+        f"Бот-скрининги (отдельно от содержательных ответов): **{bot_screenings}**",
         f"Интервью: **{stage_counts['interview']}** ({pct(stage_counts['interview'], total)})",
         f"Офферы: **{stage_counts['offer']}** ({pct(stage_counts['offer'], total)})",
         f"Отказы: **{rejections}** ({pct(rejections, total)})",
@@ -656,12 +744,31 @@ def build_summary(start: datetime, end: datetime) -> str:
             "",
         ]
     )
+    lines.append(render_analytics(analyze(applications, vacancies, events, start, end, as_of, window_days, feedback=feedback)))
     return "\n".join(lines)
 
 
 def command_summary(args: argparse.Namespace) -> int:
     start, end = period_from_args(args)
-    print(build_summary(start, end))
+    as_of = parse_iso(args.as_of) if args.as_of else datetime.now(WORKSPACE_TZ)
+    if args.as_json:
+        with transaction():
+            result = analyze(load_jsonl(FILES["application"]), latest_by_id(load_jsonl(FILES["vacancy"])),
+                             load_jsonl(FILES["event"]), start, end, as_of, args.window_days,
+                             feedback=load_jsonl(FILES["feedback"]))
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print(build_summary(start, end, as_of=as_of, window_days=args.window_days))
+    return 0
+
+
+def command_experiment_status(args: argparse.Namespace) -> int:
+    experiments = latest_by_id(load_jsonl(FILES["experiment"]))
+    if args.experiment_id not in experiments:
+        raise StoreError("Неизвестный experiment_id")
+    result = experiment_status(experiments[args.experiment_id], load_jsonl(FILES["application"]),
+                               parse_iso(args.as_of) if args.as_of else datetime.now(WORKSPACE_TZ))
+    print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -669,7 +776,8 @@ def command_dashboard(args: argparse.Namespace) -> int:
     start, end = period_from_args(args)
     output = local_path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(build_summary(start, end), encoding="utf-8")
+    output.write_text(build_summary(start, end, as_of=parse_iso(args.as_of) if args.as_of else None,
+                                    window_days=args.window_days), encoding="utf-8")
     print(output)
     return 0
 
@@ -757,6 +865,8 @@ def add_period_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--days", type=int, default=7)
     parser.add_argument("--since", help="YYYY-MM-DD")
     parser.add_argument("--until", help="YYYY-MM-DD включительно")
+    parser.add_argument("--as-of", help="Момент среза событий ISO, отдельно от даты когорты")
+    parser.add_argument("--window-days", type=int, default=read_config("workflow.json")["response_window_days"])
 
 
 def add_json_command(subparsers: Any, name: str, handler: Any) -> None:
@@ -784,11 +894,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     summary_parser = subparsers.add_parser("summary")
     add_period_args(summary_parser)
+    summary_parser.add_argument("--json", action="store_true", dest="as_json")
     summary_parser.set_defaults(handler=command_summary)
+
+    experiment_parser = subparsers.add_parser("experiment-status")
+    experiment_parser.add_argument("--id", dest="experiment_id", required=True)
+    experiment_parser.add_argument("--as-of")
+    experiment_parser.set_defaults(handler=command_experiment_status)
 
     dashboard_parser = subparsers.add_parser("dashboard")
     add_period_args(dashboard_parser)
-    dashboard_parser.add_argument("--output", default="reports/dashboard.md")
+    dashboard_parser.add_argument("--output", default="DASHBOARD.md")
     dashboard_parser.set_defaults(handler=command_dashboard)
 
     validate_parser = subparsers.add_parser("validate")

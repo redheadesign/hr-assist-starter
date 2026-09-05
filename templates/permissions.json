@@ -6,5 +6,22 @@
   "publish_profiles": false,
   "schedule_meetings": false,
   "automatic_uploads": false,
-  "authorization_log": []
+  "authorization_log": [],
+  "reply_to_vacancy_bots": false,
+  "standing_application_authorization": {
+    "active": false,
+    "id": null,
+    "granted_on": null,
+    "source": null,
+    "platforms": [],
+    "data": [],
+    "resume_refs": {}
+  },
+  "bot_dialog_authorization": {
+    "active": false,
+    "id": null,
+    "granted_on": null,
+    "source": null,
+    "allowed_topics": []
+  }
 }

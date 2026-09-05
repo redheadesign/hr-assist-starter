@@ -1,0 +1,19 @@
+{
+  "automation_id": null,
+  "project_id": null,
+  "enabled": false,
+  "idle_check_minutes": 240,
+  "active_check_minutes": 5,
+  "inactivity_timeout_minutes": 60,
+  "short_wait_seconds": [
+    10,
+    30,
+    60
+  ],
+  "post_campaign_probe_minutes": [
+    5,
+    10,
+    60
+  ],
+  "coordinator_id": "hr-main"
+}

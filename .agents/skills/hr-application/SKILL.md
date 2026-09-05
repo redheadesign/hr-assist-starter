@@ -1,6 +1,6 @@
 ---
 name: hr-application
-description: Draft or revise a job application, recruiter reply or direct outreach using confirmed candidate facts and platform-specific formatting. Does not send messages by default.
+description: Draft, submit and verify authorized job applications or prepare recruiter replies using confirmed facts and platform rules. Sends only within the current owner's recorded or explicit authorization.
 ---
 
 # Отклик или ответ
@@ -10,4 +10,5 @@ description: Draft or revise a job application, recruiter reply or direct outrea
 3. Выбери тон по компании и пользовательским примерам. Не делай юмор обязательным. Учти конкретный вопрос HR, ограничения поля, язык и рынок.
 4. Сохрани черновик в `.local/drafts/`; проверь `scripts/validate_copy.py <путь> --channel <канал>`. Числовые ориентиры редактора не являются статистикой рынка; предупреждение можно осмысленно разобрать.
 5. В сообщении для копирования оставь только отправляемый текст. Пояснения вынеси отдельно. Ссылки и контакты бери из профиля, не из старого письма.
-6. Не отправляй без разрешения. После подтверждённой отправки создай вакансию и отклик через `hr_store.py`, сохрани реальный текст, дату, площадку, краткое описание вакансии и вариант подачи. Черновик не считается откликом.
+6. Проверь hr_policy authorize и docs/workflow.md: непустой canonical_key, выбранное резюме, пакет, актуальный review и claim. Постоянное согласие не спрашивай повторно. Выполни разрешённую отправку, наблюдай статус точной заявки, затем запиши observe-application с доказательством. Confirm-sent предназначен для сообщения владельца о сделанной отправке. Клик и черновик не являются отправкой.
+7. При стандартном бот-скрининге используй docs/bot-dialog.md и отдельное согласие bot_reply. При неизвестном факте или ответе человека подготовь нужное действие владельцу.

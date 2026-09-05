@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "company_cache_days": 14,
+  "response_window_days": 14,
+  "state_file": "data/workflow-state.json",
+  "submission_evidence": {
+    "accepted_kinds": [
+      "application_status",
+      "bound_chat_status",
+      "official_receipt"
+    ],
+    "required_fields": [
+      "kind",
+      "vacancy_key",
+      "source_url",
+      "observed_at",
+      "status",
+      "artifact_ref"
+    ],
+    "accepted_statuses": [
+      "submitted",
+      "delivered",
+      "already_applied"
+    ],
+    "observer": "submission_worker",
+    "coordinator_reopens_on": [
+      "uncertain",
+      "conflicting_evidence",
+      "missing_identity",
+      "new_route",
+      "sampled_quality_check"
+    ]
+  }
+}

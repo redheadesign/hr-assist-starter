@@ -17,7 +17,11 @@
       "basis": null,
       "publish": false
     },
-    "excluded_segments": []
+    "excluded_segments": [],
+    "employment": [],
+    "languages": {},
+    "test_before_interview": null,
+    "start_availability": null
   },
   "writing": {
     "tone": null,
@@ -28,5 +32,15 @@
   "schedule": {
     "enabled": false,
     "requested": null
+  },
+  "campaign": {
+    "enabled": false,
+    "daily_minimum": null,
+    "daily_maximum": null,
+    "eligibility_floor_score": 70,
+    "sources": [],
+    "catch_up_enabled": false,
+    "parallel_agents": false,
+    "max_workers": 4
   }
 }

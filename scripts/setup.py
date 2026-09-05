@@ -10,15 +10,28 @@ STAGES = ("basics", "documents", "experience", "preferences", "writing", "channe
 TABLES = ("vacancies", "applications", "events", "feedback", "experiments", "outreach-targets", "suppressions", "adapter-scans")
 
 
+def merge_missing(value, defaults):
+    """Add new optional fields without replacing existing answers or permissions."""
+    if not isinstance(value, dict) or not isinstance(defaults, dict):
+        return value
+    result = dict(value)
+    for key, default in defaults.items():
+        result[key] = merge_missing(value[key], default) if key in value else default
+    return result
+
+
 def initialize():
     version_path = local_path("schema-version.json")
     version = read_json(version_path, {"version": VERSION})
     if version.get("version") != VERSION:
         raise ValueError("Unsupported local schema; preserve data and use an explicit migration")
-    for name in ("settings", "profile", "permissions", "adapters"):
+    for name in ("settings", "profile", "permissions", "adapters", "channels", "workflow", "bot-monitor", "company-career-sources"):
         target = local_path(f"config/{name}.json")
-        if not target.exists():
-            write_json(target, read_json(ROOT / "templates" / f"{name}.json"))
+        defaults = read_json(ROOT / "templates" / f"{name}.json")
+        previous = read_json(target, {})
+        updated = merge_missing(previous, defaults)
+        if not target.exists() or updated != previous:
+            write_json(target, updated)
     for folder in ("documents", "photos", "artifacts", "reports/daily", "reports/weekly", "reports/resume-review", "inputs", "drafts", "knowledge/incidents", "onboarding"):
         local_path(folder).mkdir(parents=True, exist_ok=True)
     for table in TABLES:

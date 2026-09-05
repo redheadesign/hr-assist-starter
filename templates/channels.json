@@ -1,0 +1,160 @@
+{
+  "version": 3,
+  "copy_style": {
+    "first_paragraph": "Связать задачу вакансии с подтверждённым опытом кандидата.",
+    "paragraph_final_punctuation": "Обычная пунктуация; учесть локальные предпочтения кандидата."
+  },
+  "channels": {
+    "headhunter": {
+      "market": "RU",
+      "target_range_excluding_links": [
+        250,
+        550
+      ],
+      "hard_max_chars_excluding_links": 650,
+      "minimum_enforced": false,
+      "short_complete_message_allowed": true,
+      "sentence_word_warning": 28,
+      "max_short_paragraph_chars": 260,
+      "structure": [
+        "точка пересечения",
+        "один доказанный факт",
+        "портфолио"
+      ],
+      "signature": false
+    },
+    "linkedin_dm": {
+      "market": "international_or_ru",
+      "target_range_excluding_links": [
+        180,
+        400
+      ],
+      "hard_max_chars_excluding_links": 500,
+      "minimum_enforced": false,
+      "short_complete_message_allowed": true,
+      "sentence_word_warning": 26,
+      "max_short_paragraph_chars": 240,
+      "language": "язык вакансии или адресата"
+    },
+    "linkedin_cover": {
+      "target_range_excluding_links": [
+        700,
+        1400
+      ],
+      "hard_max_chars_excluding_links": 1600,
+      "minimum_enforced": false,
+      "sentence_word_warning": 32,
+      "max_short_paragraph_chars": 420,
+      "use_only_when_form_has_no_shorter_limit": true
+    },
+    "telegram": {
+      "target_range_excluding_links": [
+        180,
+        550
+      ],
+      "hard_max_chars_excluding_links": 650,
+      "minimum_enforced": false,
+      "short_complete_message_allowed": true,
+      "sentence_word_warning": 26,
+      "max_short_paragraph_chars": 240,
+      "personalize": true,
+      "max_new_contacts_per_day": 5
+    },
+    "email": {
+      "target_range_excluding_links": [
+        220,
+        550
+      ],
+      "hard_max_chars_excluding_links": 700,
+      "minimum_enforced": false,
+      "short_complete_message_allowed": true,
+      "sentence_word_warning": 28,
+      "max_short_paragraph_chars": 260,
+      "subject_required": true,
+      "max_new_contacts_per_day": 10,
+      "max_follow_ups": 1,
+      "follow_up_after_business_days": 5
+    },
+    "form_answer": {
+      "target_range_excluding_links": null,
+      "hard_max_chars_excluding_links": null,
+      "minimum_enforced": false,
+      "sentence_word_warning": 32,
+      "max_short_paragraph_chars": 420,
+      "rule": "Ответить ровно на вопрос и соблюдать лимит формы"
+    }
+  },
+  "platforms": {
+    "headhunter": {
+      "short_application_profile": "headhunter",
+      "aliases": [
+        "hh",
+        "hh.ru"
+      ]
+    },
+    "getmatch": {
+      "short_application_profile": "headhunter",
+      "aliases": [
+        "getmatch.ru"
+      ]
+    },
+    "hirehi": {
+      "short_application_profile": "headhunter",
+      "aliases": [
+        "hirehi_middle",
+        "hirehi_senior",
+        "hirehi.ru"
+      ]
+    },
+    "hirify": {
+      "short_application_profile": "headhunter",
+      "aliases": [
+        "hirify.me"
+      ]
+    },
+    "habr_career": {
+      "short_application_profile": "headhunter",
+      "aliases": [
+        "habr",
+        "career.habr.com"
+      ]
+    },
+    "dprofile": {
+      "short_application_profile": "headhunter",
+      "aliases": [
+        "dprofile.ru"
+      ]
+    },
+    "company_careers": {
+      "short_application_profile": "headhunter",
+      "aliases": [
+        "company_career",
+        "career_site"
+      ]
+    },
+    "vk": {
+      "short_application_profile": "headhunter",
+      "aliases": [
+        "vkontakte",
+        "vk_jobs"
+      ]
+    },
+    "linkedin": {
+      "short_application_profile": "linkedin_dm",
+      "aliases": []
+    },
+    "telegram": {
+      "short_application_profile": "telegram",
+      "aliases": []
+    },
+    "email": {
+      "short_application_profile": "email",
+      "aliases": []
+    }
+  },
+  "message_types": {
+    "cover_letter": "Киккер и пунктуация по copy_style; один главный факт, затем следующий шаг.",
+    "screening_answer": "Прямой ответ на текущий вопрос, обычная пунктуация; без обязательных киккера, кейса и CTA.",
+    "exact_reply": "Сохранить подтверждённую реплику буквально, включая пунктуацию."
+  }
+}
