@@ -15,5 +15,21 @@
     10,
     60
   ],
-  "coordinator_id": "hr-main"
+  "coordinator_id": "hr-main",
+  "inbox_urls": {
+    "headhunter": "https://hh.ru/chat"
+  },
+  "error_policy": {
+    "browser_timeout_ms": 60000,
+    "diagnostic_model": "gpt-5.6-sol",
+    "prearm_before_browser": true,
+    "diagnostic_reasoning_effort": "high",
+    "backoff_minutes": [
+      240,
+      480,
+      1440
+    ],
+    "max_diagnostic_attempts": 1,
+    "unfinished_retry_minutes": 240
+  }
 }

@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "scope": "scheduled_hr_jobs",
+  "forbidden_models": ["gpt-6-astra"],
+  "scheduled_allowed_models": ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"],
+  "routes": {
+    "coordinator": {"model": "gpt-5.6-sol", "reasoning_effort": "high"},
+    "text": {"model": "gpt-5.6-sol", "reasoning_effort": "high"},
+    "scout": {
+      "model": "gpt-5.6-luna", "reasoning_effort": "medium",
+      "fallbacks": [
+        {"model": "gpt-5.6-terra", "reasoning_effort": "medium"},
+        {"model": "gpt-5.6-sol", "reasoning_effort": "high"}
+      ]
+    },
+    "company_checker": {
+      "model": "gpt-5.6-terra", "reasoning_effort": "medium",
+      "fallbacks": [{"model": "gpt-5.6-sol", "reasoning_effort": "high"}]
+    },
+    "reviewer": {
+      "model": "gpt-5.6-terra", "reasoning_effort": "high",
+      "fallbacks": [{"model": "gpt-5.6-sol", "reasoning_effort": "high"}]
+    },
+    "application_worker": {
+      "model": "gpt-5.6-terra", "reasoning_effort": "medium",
+      "fallbacks": [{"model": "gpt-5.6-sol", "reasoning_effort": "high"}]
+    },
+    "bot_dispatcher": {
+      "model": "gpt-5.6-terra", "reasoning_effort": "medium",
+      "fallbacks": [{"model": "gpt-5.6-sol", "reasoning_effort": "high"}]
+    },
+    "bot_responder": {
+      "model": "gpt-5.6-terra", "reasoning_effort": "medium",
+      "fallbacks": [{"model": "gpt-5.6-sol", "reasoning_effort": "high"}]
+    },
+    "weekly_review": {"model": "gpt-5.6-terra", "reasoning_effort": "high"},
+    "resume_review": {"model": "gpt-5.6-sol", "reasoning_effort": "high"}
+  },
+  "worker_limits": {
+    "max_active": 4,
+    "max_sites_per_scout": 4,
+    "max_applications_per_worker": 4,
+    "fork_turns": "none",
+    "nested_delegation": false,
+    "handoff_wait_seconds": 60,
+    "no_progress_seconds": 180,
+    "no_progress_browser_calls": 8
+  }
+}

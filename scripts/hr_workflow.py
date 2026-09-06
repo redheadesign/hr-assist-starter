@@ -25,11 +25,36 @@ def load_state(root=ROOT):
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {"version": 1, "days": {}, "companies": {}, "blockers": {}}
 
 
-def expected_sources(root=ROOT):
+def expected_sources(root=ROOT, day=None):
     config = json.loads((root / "config/settings.json").read_text(encoding="utf-8"))
     companies = json.loads((root / "config/company-career-sources.json").read_text(encoding="utf-8"))["companies"]
-    return sorted({normalize_platform(s["id"]) for s in config["campaign"]["sources"] if s["id"] != "company_careers"}
-                  | {"company:" + c.get("scan_group", c["id"]) for c in companies})
+    day = day or datetime.now(hr_store.WORKSPACE_TZ).date().isoformat()
+    weekday = datetime.strptime(day, "%Y-%m-%d").weekday()
+    raw_cadence = config["campaign"].get("source_cadence", {})
+    if not isinstance(raw_cadence, dict):
+        raise ValueError("source_cadence must be a mapping")
+    cadence = {}
+    for key, rule in raw_cadence.items():
+        canonical = normalize_platform(key)
+        if canonical in cadence:
+            raise ValueError("Duplicate cadence aliases")
+        if not isinstance(rule, dict) or rule.get("frequency") not in {"daily", "weekly", "manual"}:
+            raise ValueError("Source cadence requires daily, weekly or manual frequency")
+        if rule["frequency"] == "weekly":
+            days = rule.get("weekdays")
+            if not isinstance(days, list) or not days or any(type(d) is not int or not 0 <= d <= 6 for d in days):
+                raise ValueError("Weekly cadence requires weekdays 0..6 (Monday..Sunday)")
+        cadence[canonical] = rule
+    enabled = set()
+    for source in config["campaign"]["sources"]:
+        key = normalize_platform(source["id"])
+        rule = cadence.get(key, {"frequency": "daily"})
+        if rule["frequency"] == "daily" or (rule["frequency"] == "weekly" and weekday in rule["weekdays"]):
+            enabled.add(key)
+    expected = enabled - {"company_careers"}
+    if "company_careers" in enabled:
+        expected.update("company:" + c.get("scan_group", c["id"]) for c in companies)
+    return sorted(expected)
 
 
 def day_status(day, *, root=ROOT):
@@ -39,10 +64,10 @@ def day_status(day, *, root=ROOT):
     inboxes = {normalize_platform(a["platform"]) for a in adapters.values()
                if a.get("transport") == "browser" and a.get("read_enabled") and a.get("initial_probe_completed")}
     coverage = {}
-    for field, expected in (("market_coverage", expected_sources(root)), ("inbox_coverage", inboxes)):
+    for field, expected in (("market_coverage", expected_sources(root, day)), ("inbox_coverage", inboxes)):
         observed = recorded.get(field, {})
         per_source = {s: observed.get(s, {"state": "unknown"}) for s in sorted(expected)}
-        coverage[field] = {"state": "complete" if per_source and all(s.get("state") == "complete" for s in per_source.values()) else "partial",
+        coverage[field] = {"state": "not_required" if not per_source else "complete" if all(s.get("state") == "complete" for s in per_source.values()) else "partial",
                            "sources": per_source}
     apps = hr_store.load_jsonl(root / "data/applications.jsonl")
     sent = {a.get("canonical_key") or a.get("id") for a in apps
@@ -56,11 +81,13 @@ def day_status(day, *, root=ROOT):
     unresolved = [t for t in queue.get("tasks", []) if t.get("day") == day
                   and t.get("type") in {"application", "source_scan"}
                   and t.get("status") not in {"completed", "failed"}]
-    completed = (coverage["market_coverage"]["state"] == "complete" and ready == 0
+    completed = (coverage["market_coverage"]["state"] in {"complete", "not_required"} and ready == 0
                  and recorded.get("pool_exhausted") is True and not unresolved)
     campaign = "complete" if completed and len(sent) >= target else "complete_with_shortfall" if completed and recorded.get("shortfall_reason") else "in_progress"
     if not search["campaign"].get("enabled"):
         campaign = "disabled"
+    if recorded.get("campaign_state") == "stopped_by_user":
+        campaign = "stopped_by_user"
     maximum = search["campaign"].get("daily_maximum")
     return {"day": day, "today_sent_count": len(sent), "daily_maximum": maximum,
             "send_budget_remaining": max(0, maximum - len(sent)) if maximum is not None else None, "target_min": target,
@@ -69,6 +96,7 @@ def day_status(day, *, root=ROOT):
             "unresolved_tasks": [{k: t.get(k) for k in ("id", "type", "status")} for t in unresolved],
             "report_exists": (root / f"reports/daily/{day}.md").exists(),
             "next_action": "configure_or_run_requested_task" if campaign == "disabled" else
+                           "respect_user_stop" if campaign == "stopped_by_user" else
                            "continue_sources_or_pending_sends" if campaign == "in_progress" else "monitor_inboxes",
             "source_stats": recorded.get("source_stats", {}), "blockers": state["blockers"]}
 
@@ -79,6 +107,10 @@ def record_day(state, payload):
     if not payload.get("artifact_ref"):
         raise ValueError("day update requires artifact_ref")
     entry = state["days"].setdefault(day, {})
+    if "campaign_state" in payload:
+        if payload["campaign_state"] != "stopped_by_user":
+            raise ValueError("Only an explicit user stop may override computed campaign state")
+        entry["campaign_state"] = "stopped_by_user"
     for field in ("market_coverage", "inbox_coverage"):
         for source, observed in payload.get(field, {}).items():
             if observed.get("state") not in {"complete", "partial", "error", "unknown"}:

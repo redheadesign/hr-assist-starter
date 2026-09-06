@@ -45,6 +45,7 @@ ACTIVE_CHAT_STATUSES = {"pending", "running", "waiting"}
 ACTIVE_POLL_SECONDS = 5 * 60
 IDLE_POLL_SECONDS = 4 * 60 * 60
 IDLE_TIMEOUT_SECONDS = 60 * 60
+MAX_HANDOFF_LEASE_SECONDS = 15 * 60
 POST_CAMPAIGN_PROBE_MINUTES = [5, 10, 60]
 DEFAULT_MONITOR_CONFIG = {
     "idle_check_minutes": IDLE_POLL_SECONDS // 60,
@@ -483,6 +484,80 @@ def renew_lease(
         raise CampaignError("Lease уже истёк; risky-задача требует явной сверки")
     task["lease_expires_at"] = iso(timestamp + timedelta(seconds=lease_seconds))
     task["updated_at"] = iso(timestamp)
+    return task
+
+
+def _require_local_artifact_ref(artifact_ref: str) -> str:
+    """Accept only a nonempty evidence reference below this workspace's .local."""
+    reference = artifact_ref.strip()
+    if not reference:
+        raise CampaignError("Handoff требует непустой --artifact-ref")
+    candidate = Path(reference)
+    local_root = local_path("").resolve()
+    try:
+        if candidate.is_absolute():
+            resolved = candidate.resolve()
+        elif candidate.parts and candidate.parts[0] == ".local":
+            resolved = (local_root.parent / candidate).resolve()
+        else:
+            resolved = (local_root / candidate).resolve()
+            reference = (Path(".local") / candidate).as_posix()
+        if not resolved.is_relative_to(local_root):
+            raise ValueError("outside local root")
+    except ValueError as exc:
+        raise CampaignError("artifact-ref для handoff должен оставаться внутри .local") from exc
+    return reference
+
+
+def handoff_task(
+    state: dict[str, Any],
+    task_id: str,
+    timestamp: datetime,
+    claim_token: str,
+    worker_id: str,
+    new_worker_id: str,
+    artifact_ref: str,
+    reconciled: bool,
+    lease_seconds: int = MAX_HANDOFF_LEASE_SECONDS,
+) -> dict[str, Any]:
+    """Transfer one live claim after reconciliation, without repeating its action."""
+    if not reconciled:
+        raise CampaignError("Handoff требует явную сверку: добавьте --reconciled")
+    artifact_ref = _require_local_artifact_ref(artifact_ref)
+    if not worker_id.strip() or not new_worker_id.strip():
+        raise CampaignError("worker-id и new-worker-id не могут быть пустыми")
+    if worker_id == new_worker_id:
+        raise CampaignError("Handoff требует нового worker-id")
+    if not 1 <= lease_seconds <= MAX_HANDOFF_LEASE_SECONDS:
+        raise CampaignError(
+            f"lease_seconds для handoff должен быть от 1 до {MAX_HANDOFF_LEASE_SECONDS}"
+        )
+    task = find_task(state, task_id)
+    if task.get("status") != "running":
+        raise CampaignError("Handoff возможен только для running-задачи")
+    if task.get("claim_token") != claim_token or task.get("worker_id") != worker_id:
+        raise CampaignError("Неверные worker_id или claim token")
+    if not task.get("lease_expires_at") or parse_time(str(task["lease_expires_at"])) <= timestamp:
+        raise CampaignError("Истёкший lease нельзя передать: сначала сверить uncertain-задачу")
+    if any(
+        other is not task
+        and other.get("status") == "running"
+        and other.get("worker_id") == new_worker_id
+        for other in state["tasks"]
+    ):
+        raise CampaignError("new-worker-id уже владеет другой running-задачей")
+
+    task.setdefault("handoff_history", []).append({
+        "at": iso(timestamp),
+        "previous_worker_id": worker_id,
+        "artifact_ref": artifact_ref,
+    })
+    task["worker_id"] = new_worker_id
+    task["claim_token"] = uuid.uuid4().hex
+    task["lease_expires_at"] = iso(timestamp + timedelta(seconds=lease_seconds))
+    task["handoff_reconciled_at"] = iso(timestamp)
+    task["updated_at"] = iso(timestamp)
+    task["attempt"] = int(task.get("attempt", 0)) + 1
     return task
 
 
@@ -948,10 +1023,27 @@ def command_renew(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_handoff(args: argparse.Namespace) -> int:
+    timestamp = now_local()
+    task = mutate(
+        args.state,
+        args.coordinator_id,
+        timestamp,
+        lambda state: handoff_task(
+            state, args.task_id, timestamp, args.claim_token, args.worker_id,
+            args.new_worker_id, args.artifact_ref, args.reconciled, args.lease_seconds,
+        ),
+    )
+    print_json({"status": "handed_off", "task": task})
+    return 0
+
+
 def command_schedule_mode(args: argparse.Namespace) -> int:
     timestamp = parse_time(args.now)
     monitor = load_monitor_config(args.monitor_config)
-    print_json(schedule_mode(load_state(args.state), timestamp, **monitor))
+    from hr_monitor_guard import apply_schedule, status as guard_status
+    print_json(apply_schedule(schedule_mode(load_state(args.state), timestamp, **monitor),
+                              guard_status(now=timestamp), timestamp))
     return 0
 
 
@@ -1082,6 +1174,19 @@ def build_parser() -> argparse.ArgumentParser:
     renew_parser.add_argument("--claim-token", required=True)
     renew_parser.add_argument("--lease-seconds", type=int, default=900)
     renew_parser.set_defaults(handler=command_renew)
+
+    handoff_parser = subparsers.add_parser(
+        "handoff", help="Передать действующий claim другому idle worker после сверки"
+    )
+    handoff_parser.add_argument("--coordinator-id", default="hr-main")
+    handoff_parser.add_argument("--task-id", required=True)
+    handoff_parser.add_argument("--worker-id", required=True)
+    handoff_parser.add_argument("--new-worker-id", required=True)
+    handoff_parser.add_argument("--claim-token", required=True)
+    handoff_parser.add_argument("--artifact-ref", required=True)
+    handoff_parser.add_argument("--reconciled", action="store_true")
+    handoff_parser.add_argument("--lease-seconds", type=int, default=MAX_HANDOFF_LEASE_SECONDS)
+    handoff_parser.set_defaults(handler=command_handoff)
 
     list_parser = subparsers.add_parser("list", help="Показать задачи, включая финальные статусы текущего дня")
     list_parser.add_argument("--now")

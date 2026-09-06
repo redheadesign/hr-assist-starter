@@ -41,6 +41,7 @@
     "sources": [],
     "catch_up_enabled": false,
     "parallel_agents": false,
-    "max_workers": 4
+    "max_workers": 4,
+    "source_cadence": {}
   }
 }

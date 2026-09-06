@@ -424,6 +424,77 @@ class CampaignTests(unittest.TestCase):
         hr_campaign.recover_stale(self.state, self.now + timedelta(minutes=2))
         self.assertEqual(task["status"], "uncertain")
 
+    def test_handoff_rotates_live_claim_and_records_reconciliation(self) -> None:
+        task = self.add("application", "handoff-app")
+        claimed, _ = hr_campaign.claim_task(
+            self.state, "worker-a", self.now, task_id=str(task["id"]), lease_seconds=60
+        )
+        original_token = str(claimed["claim_token"])
+
+        handed_off = hr_campaign.handoff_task(
+            self.state,
+            str(task["id"]),
+            self.now + timedelta(seconds=10),
+            original_token,
+            "worker-a",
+            "worker-b",
+            ".local/reports/handoff.json",
+            reconciled=True,
+            lease_seconds=30,
+        )
+
+        self.assertEqual(handed_off["worker_id"], "worker-b")
+        self.assertNotEqual(handed_off["claim_token"], original_token)
+        self.assertEqual(handed_off["attempt"], 2)
+        self.assertEqual(handed_off["handoff_reconciled_at"], "2026-09-05T12:00:10+00:00")
+        self.assertEqual(handed_off["handoff_history"], [{
+            "at": "2026-09-05T12:00:10+00:00",
+            "previous_worker_id": "worker-a",
+            "artifact_ref": ".local/reports/handoff.json",
+        }])
+        with self.assertRaisesRegex(hr_campaign.CampaignError, "claim token"):
+            hr_campaign.renew_lease(
+                self.state, str(task["id"]), self.now + timedelta(seconds=20),
+                original_token, "worker-a",
+            )
+
+    def test_handoff_rejects_unreconciled_or_missing_evidence(self) -> None:
+        task = self.add("application", "handoff-evidence")
+        claimed, _ = hr_campaign.claim_task(self.state, "worker-a", self.now)
+        args = (self.state, str(task["id"]), self.now, str(claimed["claim_token"]), "worker-a", "worker-b")
+
+        with self.assertRaisesRegex(hr_campaign.CampaignError, "явную сверку"):
+            hr_campaign.handoff_task(*args, ".local/reports/evidence.json", reconciled=False)
+        with self.assertRaisesRegex(hr_campaign.CampaignError, "непустой"):
+            hr_campaign.handoff_task(*args, "  ", reconciled=True)
+
+    def test_handoff_rejects_expired_claim_busy_target_and_long_lease(self) -> None:
+        task = self.add("application", "handoff-expired")
+        claimed, _ = hr_campaign.claim_task(
+            self.state, "worker-a", self.now, lease_seconds=10
+        )
+        args = (self.state, str(task["id"]), self.now + timedelta(seconds=10), str(claimed["claim_token"]), "worker-a", "worker-b", ".local/reports/evidence.json")
+        with self.assertRaisesRegex(hr_campaign.CampaignError, "Истёкший lease"):
+            hr_campaign.handoff_task(*args, reconciled=True)
+
+        live = self.add("application", "handoff-live")
+        live_claim, _ = hr_campaign.claim_task(self.state, "worker-c", self.now, task_id=str(live["id"]))
+        busy = self.add("source_scan")
+        hr_campaign.claim_task(self.state, "worker-b", self.now, task_id=str(busy["id"]))
+        live_args = (self.state, str(live["id"]), self.now, str(live_claim["claim_token"]), "worker-c", "worker-b", ".local/reports/evidence.json")
+        with self.assertRaisesRegex(hr_campaign.CampaignError, "уже владеет"):
+            hr_campaign.handoff_task(*live_args, reconciled=True)
+        with self.assertRaisesRegex(hr_campaign.CampaignError, "от 1 до"):
+            hr_campaign.handoff_task(*live_args, reconciled=True, lease_seconds=901)
+
+    def test_handoff_rejects_local_evidence_path_escape(self) -> None:
+        task = self.add("application", "handoff-path")
+        claimed, _ = hr_campaign.claim_task(self.state, "worker-a", self.now)
+        args = (self.state, str(task["id"]), self.now, str(claimed["claim_token"]), "worker-a", "worker-b")
+        for path in ("../evidence.json", "C:/outside/evidence.json", ".local/../outside.json", ".local/../../outside.json"):
+            with self.subTest(path=path), self.assertRaisesRegex(hr_campaign.CampaignError, "внутри .local"):
+                hr_campaign.handoff_task(*args, path, reconciled=True)
+
     def test_cli_exposes_adaptive_chat_contract(self) -> None:
         parser = hr_campaign.build_parser()
         defer = parser.parse_args([
@@ -439,6 +510,11 @@ class CampaignTests(unittest.TestCase):
             "renew-lease", "--task-id", "task-1", "--worker-id", "worker-1",
             "--claim-token", "claim-1",
         ])
+        handoff = parser.parse_args([
+            "handoff", "--task-id", "task-1", "--worker-id", "worker-1",
+            "--new-worker-id", "worker-2", "--claim-token", "claim-1",
+            "--artifact-ref", ".local/reports/handoff.json", "--reconciled",
+        ])
         schedule = parser.parse_args(["schedule-mode"])
         post_campaign = parser.parse_args([
             "post-campaign", "--campaign-key", "daily-2026-09-05"
@@ -453,6 +529,8 @@ class CampaignTests(unittest.TestCase):
         self.assertTrue(defer.closing)
         self.assertTrue(finish.explicit_completion)
         self.assertEqual(renew.command, "renew-lease")
+        self.assertEqual(handoff.command, "handoff")
+        self.assertFalse(hasattr(handoff, "now"))
         self.assertEqual(schedule.command, "schedule-mode")
         self.assertEqual(post_campaign.command, "post-campaign")
         self.assertEqual(due_probes.command, "due-probes")

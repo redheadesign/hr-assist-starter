@@ -22,6 +22,8 @@ Facts.json является списком. У передаваемых факт
 
 Один координатор добавляет задачи, выдаёт claims и сохраняет результаты. Исполнитель получает claim_token, сам не меняет общую очередь. Токен claim является локальным идентификатором владения задачей, не паролем. Он защищает от второго исполнителя и устаревшего finish. При истёкшем claim рискованная задача требует проверки статуса, а не автоматической повторной отправки. Перед выдачей новых claims координатор резервирует daily_maximum с учётом уже выполняемых заявок.
 
+Для смены исполнителя текущей заявки: `hr_campaign.py handoff --task-id ID --worker-id OLD --new-worker-id NEW --claim-token TOKEN --artifact-ref .local/reports/reconciliation.json --reconciled`. Сначала останови прежнего исполнителя и сверь точную заявку. Только действующий running claim, другой свободный worker и локальное доказательство; lease не больше 900 секунд. Команда меняет token, сохраняет историю и не отправляет заявку. Для expired/uncertain сначала отдельная сверка, handoff их не обходит. Пачки до четырёх элементов работают в одном активном ходе по docs/economy.md, но каждый элемент получает свой claim после завершения предыдущего.
+
 ## Подтверждение отправки и CRM
 
 `hr_workflow.py evidence --json .local/inputs/result.json` принимает canonical_key и evidence. В evidence: kind (application_status, bound_chat_status, official_receipt), vacancy_key, source_url, observed_at, status (submitted, delivered, already_applied), artifact_ref. Receipt должен подтверждать конкретную форму в локальном артефакте. Клик и заполненное поле не подходят.
@@ -34,12 +36,14 @@ Facts.json является списком. У передаваемых факт
 
 `hr_workflow.py day --day YYYY-MM-DD` показывает sent, цель, верхний предел, охват рынка/входящих, незавершённые задачи. Report_exists не закрывает день. Disabled означает, что кампания выключена. Все даты приводятся к часовому поясу владельца.
 
-`record-day --json FILE`: day, artifact_ref; market_coverage/inbox_coverage как source → {state:complete/partial/error, evidence}; ready_to_send, pool_exhausted, shortfall_reason. Source_stats хранит измеренные unique_found, eligible, duplicates, sent, duration_seconds, agent_count, tokens. Неизвестное null. Предел отправок не доказывает исчерпание рынка; зафиксируй остаток. Незаконченная очередь не позволяет закрыть день.
+`record-day --json FILE`: day, artifact_ref; market_coverage/inbox_coverage как source → {state:complete/partial/error, evidence}; ready_to_send, pool_exhausted, shortfall_reason. При явной остановке владельцем campaign_state=stopped_by_user сохраняется независимо от последующих отчётов, не возобновляй этот день автоматически. Source_stats хранит измеренные unique_found, eligible, duplicates, sent, duration_seconds, agent_count, tokens и отдельные model/reasoning_effort по исполнителям. Неизвестное null. Предел отправок не доказывает исчерпание рынка; зафиксируй остаток. Незаконченная очередь не позволяет закрыть день. Охват рассчитывается по источникам на указанную дату через source_cadence; отсутствие назначенных источников отображается как not_required.
 
 `record-company --json FILE`: company_id, risk_context, checked_at, evidence, safe. `company --json FILE` с company_id/risk_context проверяет свежесть. Новый контекст получателя или истёкший срок отменяет кэш.
 
 `blocker --json FILE`: platform, reason, evidence, observed_at, notified. После фактического уведомления запиши notified=true. Повтор той же причины не уведомляется. Новый вход или наблюдаемое устранение фиксируй с reason=null.
 
 После всей пачки новых отправок coordinator вызывает post-campaign, затем due-probes/ack-probe. Повтор пачки идемпотентен; сроки +5/+10/+60 минут от завершения. Между 10-й и 60-й минутой без активности нет пустых пятиминутных проверок. Подробности аргументов через --help. Schedule-mode возвращает режим и следующую проверку, но само не изменяет задание в приложении.
+
+При ошибке приоритет имеет `hr_monitor_guard.py status` и docs/monitor-errors.md. Guard хранит попытки и cooldown отдельно от успешного inbox-checkpoint. Перед браузером реальное задание переводится на безопасный интервал, begin заранее записывает срок повтора; после любого исхода finish и обновление расписания обязательны. Просроченные probes не отменяют паузу. Нельзя продвинуть точку непрочитанного сообщения ради изменения времени следующей попытки.
 
 `hr_store.py dashboard` создаёт `.local/DASHBOARD.md`; summary --since/--until/--as-of --json позволяет сравнивать фиксированные когорты. Недельный отчёт сохраняй как датированный снимок, не переписывай его новым состоянием без пометки.

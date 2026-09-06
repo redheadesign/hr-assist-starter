@@ -25,7 +25,7 @@ def initialize():
     version = read_json(version_path, {"version": VERSION})
     if version.get("version") != VERSION:
         raise ValueError("Unsupported local schema; preserve data and use an explicit migration")
-    for name in ("settings", "profile", "permissions", "adapters", "channels", "workflow", "bot-monitor", "company-career-sources"):
+    for name in ("settings", "profile", "permissions", "adapters", "channels", "workflow", "bot-monitor", "company-career-sources", "model-routing"):
         target = local_path(f"config/{name}.json")
         defaults = read_json(ROOT / "templates" / f"{name}.json")
         previous = read_json(target, {})
